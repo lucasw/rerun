@@ -19,6 +19,7 @@ import numpy.typing as npt
 import requests
 import rerun as rr  # pip install rerun-sdk
 import torch
+import torchvision
 from PIL import Image
 
 DESCRIPTION = """
@@ -92,6 +93,8 @@ class Detector:
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         logging.info(self.device)
         self.model.to(self.device)
+        logging.info(type(self.feature_extractor))
+        logging.info(dir(self.feature_extractor))
         # self.feature_extractor.to(device)
 
         self.is_thing_from_id: dict[int, bool] = {cat["id"]: bool(cat["isthing"]) for cat in coco_categories}
@@ -100,12 +103,11 @@ class Detector:
         logging.info("Looking for things to track on frame %d", frame_idx)
 
         logging.debug("Preprocess image for detection network")
-        pil_im_small = Image.fromarray(rgb)
+        pil_im_small = torchvision.transforms.functional.pil_to_tensor(Image.fromarray(rgb)).to(self.device)
+        logging.debug(f"run feature extractor {type(pil_im_small)}")
         inputs = self.feature_extractor(images=pil_im_small, return_tensors="pt")
+        logging.debug("done feature extractor")
         _, _, scaled_height, scaled_width = inputs["pixel_values"].shape
-        scaled_size = (scaled_width, scaled_height)
-        rgb_scaled = cv2.resize(rgb, scaled_size)
-        rr.log("segmentation/rgb_scaled", rr.Image(rgb_scaled).compress(jpeg_quality=85))
 
         logging.debug(f"Pass image {type(inputs)} to detection network")
         outputs = self.model(**inputs.to(self.device))
@@ -113,32 +115,44 @@ class Detector:
         logging.debug("Extracting detections and segmentations from network output")
         processed_sizes = [(scaled_height, scaled_width)]
         segmentation_mask = self.feature_extractor.post_process_semantic_segmentation(outputs, processed_sizes)[0]
+
+        logging.debug("post process object detection")
         detections = self.feature_extractor.post_process_object_detection(
             outputs, threshold=0.8, target_sizes=processed_sizes
         )[0]
 
+        logging.debug("get mask on cpu")
         mask = segmentation_mask.detach().cpu().numpy().astype(np.uint8)
-        rr.log("segmentation", rr.SegmentationImage(mask))
 
+        logging.debug("get boxes/ids/things for logging")
         boxes = detections["boxes"].detach().cpu().numpy()
         class_ids = detections["labels"].detach().cpu().numpy()
         things = [self.is_thing_from_id[id] for id in class_ids]
 
+        logging.debug("make image for viz")
+        scaled_size = (scaled_width, scaled_height)
+        rgb_scaled = cv2.resize(rgb, scaled_size)
+
+        logging.debug("rr logging")
+        rr.log("segmentation/rgb_scaled", rr.Image(rgb_scaled).compress(jpeg_quality=85))
+        rr.log("segmentation", rr.SegmentationImage(mask))
         self.log_detections(boxes, class_ids, things)
+        logging.debug("rr logging done")
 
         objects_to_track: list[Detection] = []
-        for idx, (class_id, is_thing) in enumerate(zip(class_ids, things)):
-            if is_thing:
-                x_min, y_min, x_max, y_max = boxes[idx, :]
-                bbox_xywh = [x_min, y_min, x_max - x_min, y_max - y_min]
-                objects_to_track.append(
-                    Detection(
-                        class_id=class_id,
-                        bbox_xywh=bbox_xywh,
-                        image_width=scaled_width,
-                        image_height=scaled_height,
+        if False:
+            for idx, (class_id, is_thing) in enumerate(zip(class_ids, things)):
+                if is_thing:
+                    x_min, y_min, x_max, y_max = boxes[idx, :]
+                    bbox_xywh = [x_min, y_min, x_max - x_min, y_max - y_min]
+                    objects_to_track.append(
+                        Detection(
+                            class_id=class_id,
+                            bbox_xywh=bbox_xywh,
+                            image_width=scaled_width,
+                            image_height=scaled_height,
+                        )
                     )
-                )
 
         return objects_to_track
 
@@ -380,9 +394,10 @@ def track_objects(video_path: str, *, max_frame_count: int | None) -> None:
 
         # if not trackers or frame_idx % 1 == 0:
         if frame_idx % skip == 0:
-            logging.info(f"frame start: {frame_idx} {time.time()}")
+            t0 = time.time()
+            logging.info(f"frame start: {frame_idx} {t0}")
             detections = detector.detect_objects_to_track(rgb=rgb, frame_idx=frame_idx)
-            logging.info(f"frame finished: {frame_idx} {time.time()}")
+            logging.info(f"frame finished: {frame_idx} {time.time() - t0}s")
             # trackers = update_trackers_with_detections(trackers, detections, label_strs, bgr)
 
         # else:
