@@ -50,6 +50,8 @@ os.environ["TRANSFORMERS_CACHE"] = str(CACHE_DIR.absolute())
 from transformers import (  # noqa: E402 module level import not at top of file
     DetrFeatureExtractor,
     DetrForSegmentation,
+    SamModel,
+    SamProcessor,
 )
 
 
@@ -81,16 +83,57 @@ class Detection:
         ]
         return Detection(self.class_id, target_bbox, target_width, target_height)
 
+class Segmentor:
+    def __init__(self, device):
+        self.device = device
+        self.model = SamModel.from_pretrained("facebook/sam-vit-base")
+        self.model.to(self.device)
+        self.processor = SamProcessor.from_pretrained("facebook/sam-vit-base")
+
+    def segment(self, rgb: cv2.typing.MatLike, frame_idx: int):
+        logging.debug("processor")
+        # TODO(lucasw) what is this?
+        # input_points = [[[450, 600]]] # 2D localization of a window
+        logging.debug(f"rgb shape {rgb.shape} {rgb.dtype}")
+        inputs = self.processor(rgb,  # input_points=input_points,
+                                return_tensors="pt").to(self.device)
+        _, _, scaled_height, scaled_width = inputs["pixel_values"].shape
+        logging.debug(f"model {scaled_height} {scaled_width}")
+        scaled_size = (scaled_width, scaled_height)
+        rgb_scaled = cv2.resize(rgb, scaled_size)
+        outputs = self.model(**inputs)
+
+        scores = outputs.iou_scores
+        logging.debug(scores)
+
+        logging.debug("post-process")
+        masks = self.processor.image_processor.post_process_masks(outputs.pred_masks.cpu(),
+                                                                  inputs["original_sizes"].cpu(),
+                                                                  inputs["reshaped_input_sizes"].cpu())
+
+        logging.debug(len(masks))
+        # TODO(lucasw) this isn't working, maybe clues here to how to get it working:
+        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/sam/modeling_sam.py
+        # or try https://huggingface.co/facebook/sam-vit-base#automatic-mask-generation
+        for ind, mask_raw in enumerate(masks):
+            # TODO(lucasw) I think these are 0.0-1.0 scores, not sure how to interpret
+            mask = (mask_raw.detach().permute(0, 2, 3, 1) * 255).cpu().numpy().astype(np.uint8)[0]
+            logging.info(f"max value in mask {np.max(mask)}")
+            logging.info(f"{ind} {mask.shape}")
+            rr.log(f"segmentation{ind}", rr.Image(mask).compress(jpeg_quality=85))
+            # rr.log(f"segmentation{ind}", rr.SegmentationImage(mask))
+            # rr.log(f"segmentation{ind}/rgb_scaled", rr.Image(rgb_scaled).compress(jpeg_quality=85))
+
 
 class Detector:
     """Detects objects to track."""
 
-    def __init__(self, coco_categories: list[dict[str, Any]]) -> None:
+    def __init__(self, coco_categories: list[dict[str, Any]], device) -> None:
+        self.device = device
         logging.info("Initializing neural net for detection and segmentation.")
         self.feature_extractor = DetrFeatureExtractor.from_pretrained("facebook/detr-resnet-50-panoptic")
         self.model = DetrForSegmentation.from_pretrained("facebook/detr-resnet-50-panoptic")
 
-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         logging.info(self.device)
         self.model.to(self.device)
         logging.info(type(self.feature_extractor))
@@ -356,7 +399,9 @@ def track_objects(video_path: str, *, max_frame_count: int | None) -> None:
     ]
     rr.log("/", rr.AnnotationContext(class_descriptions), static=True)
 
-    detector = Detector(coco_categories=coco_categories)
+    device = "cpu"  # "cuda:0" if torch.cuda.is_available() else "cpu"
+    # detector = Detector(coco_categories=coco_categories, device=device)
+    segmentor = Segmentor(device=device)
 
     logging.info("Loading input video: %s", str(video_path))
     # cap = cv2.VideoCapture(video_path)
@@ -396,7 +441,8 @@ def track_objects(video_path: str, *, max_frame_count: int | None) -> None:
         if frame_idx % skip == 0:
             t0 = time.time()
             logging.info(f"frame start: {frame_idx} {t0}")
-            detections = detector.detect_objects_to_track(rgb=rgb, frame_idx=frame_idx)
+            # detections = detector.detect_objects_to_track(rgb=rgb, frame_idx=frame_idx)
+            segments = segmentor.segment(rgb=rgb, frame_idx=frame_idx)
             logging.info(f"frame finished: {frame_idx} {time.time() - t0}s")
             # trackers = update_trackers_with_detections(trackers, detections, label_strs, bgr)
 
@@ -458,6 +504,7 @@ def main() -> None:
     )
     parser.add_argument("--dataset-dir", type=Path, default=DATASET_DIR, help="Directory to save example videos to.")
     parser.add_argument("--video-path", type=str, default="", help="Full path to video to run on. Overrides `--video`.")
+    # parser.add_argument("--addr", type=str, default="127.0.0.1:9876", help="ip address:port")
     parser.add_argument(
         "--max-frame",
         type=int,
@@ -466,6 +513,9 @@ def main() -> None:
     rr.script_add_args(parser)
     args = parser.parse_args()
 
+    logging.info(args.addr)
+    # rr.init("segment")
+    # rr.connect(addr=args.addr)
     rr.script_setup(args, "rerun_example_detect_and_track_objects")
 
     # setup_logging()
