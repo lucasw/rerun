@@ -7,6 +7,8 @@ import argparse
 import json
 import logging
 import os
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Sequence
@@ -197,7 +199,7 @@ class Tracker:
                 bbox_xywh=bbox_xywh, image_width=self.tracked.image_width, image_height=self.tracked.image_height
             )
         else:
-            logging.info("Tracker update failed for tracker with id #%d", self.tracking_id)
+            logger.info("Tracker update failed for tracker with id #%d", self.tracking_id)
             self.tracker = None
 
         self.log_tracked()
@@ -337,35 +339,51 @@ def track_objects(video_path: str, *, max_frame_count: int | None) -> None:
     detector = Detector(coco_categories=coco_categories)
 
     logging.info("Loading input video: %s", str(video_path))
-    cap = cv2.VideoCapture(video_path)
+    # cap = cv2.VideoCapture(video_path)
     frame_idx = 0
 
-    label_strs = [cat["name"] or str(cat["id"]) for cat in coco_categories]
-    trackers: list[Tracker] = []
-    while cap.isOpened():
+    skip = 1  # 40
+
+    # label_strs = [cat["name"] or str(cat["id"]) for cat in coco_categories]
+    # trackers: list[Tracker] = []
+
+    # while cap.isOpened():
+    for file_path in os.listdir(video_path):
+        file_path = os.path.join(video_path, file_path)
+        if not os.path.isfile(file_path):
+            continue
+        image_path = file_path  # os.fsdecode(file_path)
         if max_frame_count is not None and frame_idx >= max_frame_count:
             break
 
-        ret, bgr = cap.read()
+        # ret, bgr = cap.read()
+        # if not ret:
+        #     logging.info("End of video")
+        #     break
+
+        bgr = cv2.imread(image_path, cv2.IMREAD_COLOR)
+        if bgr is None:
+            continue
+
+        # TODO(lucasw) rr.log the name
+        print(image_path)
         rr.set_time_sequence("frame", frame_idx)
-
-        if not ret:
-            logging.info("End of video")
-            break
-
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        # TODO(lucasw) re-compresses what was probably already compressed on disk
         rr.log("image", rr.Image(rgb).compress(jpeg_quality=85))
 
-        if not trackers or frame_idx % 40 == 0:
+        # if not trackers or frame_idx % 1 == 0:
+        if frame_idx % skip == 0:
+            logging.info(f"frame: {frame_idx} {time.time()}")
             detections = detector.detect_objects_to_track(rgb=rgb, frame_idx=frame_idx)
-            trackers = update_trackers_with_detections(trackers, detections, label_strs, bgr)
+            # trackers = update_trackers_with_detections(trackers, detections, label_strs, bgr)
 
-        else:
-            if frame_idx % 10 == 0:
-                logging.debug("Running tracking update step for frame %d", frame_idx)
-            for tracker in trackers:
-                tracker.update(bgr)
-            trackers = [tracker for tracker in trackers if tracker.is_tracking]
+        # else:
+        #     if frame_idx % 10 == 0:
+        #         logging.debug("Running tracking update step for frame %d", frame_idx)
+        #     for tracker in trackers:
+        #         tracker.update(bgr)
+        #     trackers = [tracker for tracker in trackers if tracker.is_tracking]
 
         frame_idx += 1
 
@@ -390,14 +408,21 @@ def get_downloaded_path(dataset_dir: Path, video_name: str) -> str:
 
 
 def setup_logging() -> None:
-    logger = logging.getLogger()
+    # TODO(lucasw) this locks up
     rerun_handler = rr.LoggingHandler("logs")
     rerun_handler.setLevel(-1)
+    logger = logging.getLogger()
     logger.addHandler(rerun_handler)
 
 
 def main() -> None:
     # Ensure the logging gets written to stderr:
+    logger = logging.getLogger("test")
+    logger.addHandler(logging.StreamHandler(stream=sys.stdout))
+    logger.setLevel("DEBUG")
+    # formatter = logging.Formatter(
+    #     fmt='%(asctime)s %(levelname)-8s %(message)s',
+    #     datefmt='%Y-%m-%d %H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler())
     logging.getLogger().setLevel("DEBUG")
 
@@ -421,7 +446,7 @@ def main() -> None:
 
     rr.script_setup(args, "rerun_example_detect_and_track_objects")
 
-    setup_logging()
+    # setup_logging()
 
     rr.log("description", rr.TextDocument(DESCRIPTION, media_type=rr.MediaType.MARKDOWN), static=True)
 
