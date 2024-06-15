@@ -18,6 +18,7 @@ import numpy as np
 import numpy.typing as npt
 import requests
 import rerun as rr  # pip install rerun-sdk
+import torch
 from PIL import Image
 
 DESCRIPTION = """
@@ -88,6 +89,11 @@ class Detector:
         self.feature_extractor = DetrFeatureExtractor.from_pretrained("facebook/detr-resnet-50-panoptic")
         self.model = DetrForSegmentation.from_pretrained("facebook/detr-resnet-50-panoptic")
 
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        logging.info(self.device)
+        self.model.to(self.device)
+        # self.feature_extractor.to(device)
+
         self.is_thing_from_id: dict[int, bool] = {cat["id"]: bool(cat["isthing"]) for cat in coco_categories}
 
     def detect_objects_to_track(self, rgb: cv2.typing.MatLike, frame_idx: int) -> list[Detection]:
@@ -101,8 +107,8 @@ class Detector:
         rgb_scaled = cv2.resize(rgb, scaled_size)
         rr.log("segmentation/rgb_scaled", rr.Image(rgb_scaled).compress(jpeg_quality=85))
 
-        logging.debug("Pass image to detection network")
-        outputs = self.model(**inputs)
+        logging.debug(f"Pass image {type(inputs)} to detection network")
+        outputs = self.model(**inputs.to(self.device))
 
         logging.debug("Extracting detections and segmentations from network output")
         processed_sizes = [(scaled_height, scaled_width)]
@@ -374,8 +380,9 @@ def track_objects(video_path: str, *, max_frame_count: int | None) -> None:
 
         # if not trackers or frame_idx % 1 == 0:
         if frame_idx % skip == 0:
-            logging.info(f"frame: {frame_idx} {time.time()}")
+            logging.info(f"frame start: {frame_idx} {time.time()}")
             detections = detector.detect_objects_to_track(rgb=rgb, frame_idx=frame_idx)
+            logging.info(f"frame finished: {frame_idx} {time.time()}")
             # trackers = update_trackers_with_detections(trackers, detections, label_strs, bgr)
 
         # else:
@@ -416,15 +423,15 @@ def setup_logging() -> None:
 
 
 def main() -> None:
-    # Ensure the logging gets written to stderr:
-    logger = logging.getLogger("test")
-    logger.addHandler(logging.StreamHandler(stream=sys.stdout))
-    logger.setLevel("DEBUG")
-    # formatter = logging.Formatter(
-    #     fmt='%(asctime)s %(levelname)-8s %(message)s',
-    #     datefmt='%Y-%m-%d %H:%M:%S')
-    logging.getLogger().addHandler(logging.StreamHandler())
-    logging.getLogger().setLevel("DEBUG")
+    file_handler = logging.FileHandler(filename='tmp.log')
+    stdout_handler = logging.StreamHandler(stream=sys.stdout)
+    handlers = [file_handler, stdout_handler]
+
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='[%(asctime)s] %(filename)s:%(lineno)d %(levelname)s - %(message)s',
+        handlers=handlers
+    )
 
     parser = argparse.ArgumentParser(description="Example applying simple object detection and tracking on a video.")
     parser.add_argument(
